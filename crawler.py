@@ -2,6 +2,7 @@ import requests
 import json
 import os
 import sys
+import re
 
 BASE_URL = 'https://studien.rj.ost.ch/'
 OUTPUT_DIRECTORY = 'data'
@@ -18,6 +19,14 @@ def getIdForModule(kuerzel):
 
 def getIdForCategory(kuerzel):
     return kuerzel.removeprefix('I-').removeprefix('I_').removeprefix('Kat_')
+
+def getAdmissionCondition(co):
+    coo = co.replace('&nbsp;', ' ').replace('&ouml;', 'ö').replace('&uuml;', 'ü').replace('&Uuml;', 'Ü').replace('<br>', '\n').replace('<br/>', '\n').replace('<br />', '\n').replace('<p>', '').replace('</p>', '')
+
+    pattern = r'[\n:;]'
+    sp = re.split(pattern, coo)
+        
+    return sp[0]
 
 
 # 'kredits' contains categories
@@ -63,16 +72,90 @@ for module in modules.values():
 
     # needed for modules, whose credits do not count towards "Studiengang Informatik"
     if 'kreditpunkte' in moduleContent and module['ects'] == 0:
-        module['ects'] = moduleContent['kreditpunkte'];
+        module['ects'] = moduleContent['kreditpunkte']
     
     if 'zustand' in moduleContent and moduleContent['zustand'] == 'deaktiviert':
         module['isDeactivated'] = True
         continue
 
+    if 'voraussetzungen' in moduleContent:
+        req = list(map(lambda m: {
+            'id': getIdForModule(m['kuerzel']),
+            'name': m['bezeichnung'],
+            'url': m['url']
+        }, moduleContent['voraussetzungen']))
+        module['requiredModules'] = req
+
+    # if 'sprache' in moduleContent:
+    #     module['language'] = moduleContent['sprache']
+    if 'english' in module['name'].lower() or ('vorausgKenntnisse' in moduleContent and 'english' in moduleContent['vorausgKenntnisse'].lower()):
+        module['language'] = 'english'
+    else:
+        module['language'] = 'german'
+
+    module['evaluation'] = []
+    if 'semesterBewertung' in moduleContent:
+        if moduleContent['semesterBewertung'] == 'Note von 1 - 6':
+            module['evaluation'].append('semester-work-exam')
+            
+        if moduleContent['semesterBewertung'] == 'bestanden / nicht bestanden':
+            module['evaluation'].append('semester-work-passed')
+
+    if 'zuordnungen' in moduleContent:
+        # reduce zuordnungen to those with semEmpfehlung > 0
+        relations = [zuordnung['semEmpfehlung'] for zuordnung in moduleContent['zuordnungen'] if zuordnung['semEmpfehlung'] > 0]
+        
+        if len(relations) > 0:
+            module['recommendedSemesterPartTime'] = max(relations)
+            module['recommendedSemesterFullTime'] = min(relations)
+
+    if 'pruefung' in moduleContent:
+        module['evaluation'].append('semester-exam')
+
+        for pruefung in moduleContent['pruefung']:
+            if pruefung['zulassung']:
+                module['semesterExamAdmissionCondition'] = getAdmissionCondition(pruefung['zulassungsBedingung'])
+            else:
+                module['semesterExamAdmissionCondition'] = 'none'
+
+            semesterExamTypes = []
+            if pruefung['pruefungMue']:
+                semesterExamTypes.append('oral')
+            
+            if pruefung['pruefungSchr']:
+                semesterExamTypes.append('written')
+
+            
+            module['semesterExamType'] = semesterExamTypes
+
+    if 'durchfuehrungen' in moduleContent:
+        semesterBegin = moduleContent['durchfuehrungen']['beginSemester'].replace('HS', 'fall').replace('FS', 'spring')
+        semesterEnd = moduleContent['durchfuehrungen']['endSemester'].replace('HS', 'fall').replace('FS', 'spring')
+        
+        if semesterBegin == semesterEnd:
+            module['semester'] = [semesterBegin]
+
+        else:
+            module['semester'] = [semesterBegin, semesterEnd]
+                        
+    if 'empfehlungen' in moduleContent:
+        reco = list(map(lambda m: {
+            'id': getIdForModule(m['kuerzel']),
+            'name': m['bezeichnung'],
+            'url': m['url']
+        }, moduleContent['empfehlungen']))
+        module['recommendedModules'] = reco
+
+    if 'dozenten' in moduleContent:
+        resp = moduleContent['dozenten']
+        c = list(map(lambda r: r['vorname'] + ' ' + r['name'], resp))
+
+        module['responsibles'] = c
+
     if 'categories' in module:
         for cat in module['categories']:
             categories[cat['id']]['modules'].append({'id': module['id'], 'name': module['name'],'url': module['url']})
-            categories[cat['id']]['total_ects'] += module['ects']
+            categories[cat['id']]['total_ects'] += module['ects']        
 
 modules = {key: value for (key, value) in modules.items() if value['isDeactivated'] == False}
 
